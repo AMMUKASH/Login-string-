@@ -4,7 +4,8 @@ from datetime import datetime, timezone, timedelta
 from aiohttp import web
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
-from telethon.tl.functions.account import GetPasswordRequest, ResetAuthorizationsRequest
+from telethon.tl.functions.account import GetPasswordRequest
+from telethon.tl.functions.auth import ResetAuthorizationsRequest
 from telethon.errors import FloodWaitError, RPCError
 from config import (
     API_ID,
@@ -24,7 +25,21 @@ asyncio.set_event_loop(loop)
 
 bot = TelegramClient("autoview_otp_bot", API_ID, API_HASH, loop=loop)
 active_clients = {}
+sudo_users = set()
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def is_owner(user_id: int) -> bool:
+    try:
+        return int(user_id) == int(OWNER_ID)
+    except Exception:
+        return False
+
+
+def is_authorized(user_id: int) -> bool:
+    if not user_id:
+        return False
+    return is_owner(user_id) or (int(user_id) in sudo_users)
 
 
 def now_ist() -> str:
@@ -108,6 +123,9 @@ HELP_TEXT = (
     "• `/otp` ʏᴀ `/lastotp` — `777000` ꜱᴇ ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ ʟᴇɪɴ\n"
     "• `/check` — 2ꜰᴀ ꜱᴛᴀᴛᴜꜱ, ʜɪɴᴛ ᴀᴜʀ ᴀᴄᴄᴏᴜɴᴛ ɪɴꜰᴏ\n"
     "• `/logout` — ᴀᴄᴛɪᴠᴇ ꜱᴇꜱꜱɪᴏɴ ᴅɪꜱᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ\n"
+    "• `/sudo <id>` — ᴜꜱᴇʀ ᴋᴏ ꜱᴜᴅᴏ ᴍᴇ ᴀᴅᴅ ᴋᴀʀᴇɪɴ (ᴏᴡɴᴇʀ)\n"
+    "• `/unsudo <id>` — ᴜꜱᴇʀ ᴋᴏ ꜱᴜᴅᴏ ꜱᴇ ʜᴀᴛᴀʏᴇɪɴ (ᴏᴡɴᴇʀ)\n"
+    "• `/sudolist` — ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴋɪ ʟɪꜱᴛ ᴅᴇᴋʜᴇɪɴ (ᴏᴡɴᴇʀ)\n"
     "• `/help` — ᴄᴏᴍᴍᴀɴᴅꜱ ʟɪꜱᴛ ᴅᴇᴋʜᴇɪɴ\n"
     "• `/guide` — ᴘᴜʀᴀ ꜱᴛᴇᴘ-ʙʏ-ꜱᴛᴇᴘ ɢᴜɪᴅᴇ ᴘᴀᴅʜᴇɪɴ\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -178,8 +196,104 @@ async def send_latest_otp(client, target_chat_id: int, phone: str):
         )
 
 
+async def extract_target_user_id(event, arg_text: str | None):
+    if arg_text:
+        cleaned = arg_text.strip()
+        if cleaned.lstrip("-").isdigit():
+            return int(cleaned)
+        try:
+            entity = await bot.get_entity(cleaned)
+            return entity.id
+        except Exception:
+            return None
+    if event.is_reply:
+        reply_msg = await event.get_reply_message()
+        if reply_msg and reply_msg.sender_id:
+            return reply_msg.sender_id
+    return None
+
+
+@bot.on(events.NewMessage(pattern=r"^/sudo(?:@\w+)?(?:\s+(.+))?$"))
+async def add_sudo_handler(event):
+    if not is_owner(event.sender_id):
+        return await event.reply("⛔ **ʏᴇʜ ᴄᴏᴍᴍᴀɴᴅ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.**")
+
+    target_id = await extract_target_user_id(event, event.pattern_match.group(1))
+    if not target_id:
+        return await event.reply("❌ **ᴜꜱᴀɢᴇ:** `/sudo <user_id/@username>` ʏᴀ ᴋɪꜱɪ ᴍꜱɢ ᴋᴏ ʀᴇᴘʟʏ ᴋᴀʀᴋᴇ `/sudo` ʟɪᴋʜᴇɪɴ.")
+
+    if is_owner(target_id):
+        return await event.reply("ℹ️ **ʏᴇʜ ᴜꜱᴇʀ ᴘᴇʜʟᴇ ꜱᴇ ʜɪ ᴏᴡɴᴇʀ ʜᴀɪ.**")
+
+    if target_id in sudo_users:
+        return await event.reply(f"ℹ️ **User `{target_id}` ᴘᴇʜʟᴇ ꜱᴇ ꜱᴜᴅᴏ ʟɪꜱᴛ ᴍᴇ ʜᴀɪ.**")
+
+    sudo_users.add(target_id)
+    await event.reply(f"✅ **User `{target_id}` ᴋᴏ ꜱᴜᴅᴏ ᴍᴇ ᴀᴅᴅ ᴋᴀʀ ᴅɪʏᴀ ɢᴀʏᴀ ʜᴀɪ.**")
+    await send_log(
+        f"🛡️ **#SUDO_ADD**\n"
+        f"• **Added User:** `{target_id}`\n"
+        f"• **By Owner:** `{event.sender_id}`\n"
+        f"• **Time:** `{now_ist()}`"
+    )
+
+
+@bot.on(events.NewMessage(pattern=r"^/unsudo(?:@\w+)?(?:\s+(.+))?$"))
+async def remove_sudo_handler(event):
+    if not is_owner(event.sender_id):
+        return await event.reply("⛔ **ʏᴇʜ ᴄᴏᴍᴍᴀɴᴅ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.**")
+
+    target_id = await extract_target_user_id(event, event.pattern_match.group(1))
+    if not target_id:
+        return await event.reply("❌ **ᴜꜱᴀɢᴇ:** `/unsudo <user_id/@username>` ʏᴀ ᴋɪꜱɪ ᴍꜱɢ ᴋᴏ ʀᴇᴘʟʏ ᴋᴀʀᴋᴇ `/unsudo` ʟɪᴋʜᴇɪɴ.")
+
+    if target_id not in sudo_users:
+        return await event.reply(f"ℹ️ **User `{target_id}` ꜱᴜᴅᴏ ʟɪꜱᴛ ᴍᴇ ɴᴀʜɪ ʜᴀɪ.**")
+
+    sudo_users.remove(target_id)
+    if target_id in active_clients:
+        try:
+            await active_clients[target_id].disconnect()
+        except Exception:
+            pass
+        del active_clients[target_id]
+
+    await event.reply(f"🗑️ **User `{target_id}` ᴋᴏ ꜱᴜᴅᴏ ꜱᴇ ʜᴀᴛᴀ ᴅɪʏᴀ ɢᴀʏᴀ ʜᴀɪ.**")
+    await send_log(
+        f"🛡️ **#SUDO_REMOVE**\n"
+        f"• **Removed User:** `{target_id}`\n"
+        f"• **By Owner:** `{event.sender_id}`\n"
+        f"• **Time:** `{now_ist()}`"
+    )
+
+
+@bot.on(events.NewMessage(pattern=r"^/sudolist(?:@\w+)?$"))
+async def sudo_list_handler(event):
+    if not is_owner(event.sender_id):
+        return await event.reply("⛔ **ʏᴇʜ ᴄᴏᴍᴍᴀɴᴅ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.**")
+
+    if not sudo_users:
+        return await event.reply(
+            f"📋 **ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ʟɪꜱᴛ**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• **Owner:** `{OWNER_ID}`\n"
+            f"• **Sudo Users:** `None`"
+        )
+
+    formatted = "\n".join(f"• `{uid}`" for uid in sorted(sudo_users))
+    await event.reply(
+        f"📋 **ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ʟɪꜱᴛ**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• **Owner:** `{OWNER_ID}`\n"
+        f"{formatted}"
+    )
+
+
 @bot.on(events.NewMessage(pattern=r"^/start(?:@\w+)?$"))
 async def start_handler(event):
+    if not is_authorized(event.sender_id):
+        return await event.reply("⛔ **ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ:** ʏᴇʜ ʙᴏᴛ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴀᴜʀ ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.")
+
     sender = await event.get_sender()
     uname = f"@{sender.username}" if sender and sender.username else "No Username"
     await event.respond(
@@ -196,26 +310,36 @@ async def start_handler(event):
 
 @bot.on(events.NewMessage(pattern=r"^/help(?:@\w+)?$"))
 async def help_handler(event):
+    if not is_authorized(event.sender_id):
+        return await event.reply("⛔ **ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ:** ʏᴇʜ ʙᴏᴛ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴀᴜʀ ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.")
     await event.reply(HELP_TEXT, buttons=back_to_start_buttons())
 
 
 @bot.on(events.NewMessage(pattern=r"^/guide(?:@\w+)?$"))
 async def guide_handler(event):
+    if not is_authorized(event.sender_id):
+        return await event.reply("⛔ **ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ:** ʏᴇʜ ʙᴏᴛ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴀᴜʀ ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.")
     await event.reply(GUIDE_TEXT, buttons=back_to_start_buttons())
 
 
 @bot.on(events.CallbackQuery(data=b"open_help"))
 async def cb_help(event):
+    if not is_authorized(event.sender_id):
+        return await event.answer("Access Denied!", alert=True)
     await event.edit(HELP_TEXT, buttons=back_to_start_buttons())
 
 
 @bot.on(events.CallbackQuery(data=b"open_guide"))
 async def cb_guide(event):
+    if not is_authorized(event.sender_id):
+        return await event.answer("Access Denied!", alert=True)
     await event.edit(GUIDE_TEXT, buttons=back_to_start_buttons())
 
 
 @bot.on(events.CallbackQuery(data=b"back_start"))
 async def cb_back_start(event):
+    if not is_authorized(event.sender_id):
+        return await event.answer("Access Denied!", alert=True)
     await event.delete()
     await event.respond(
         START_CAPTION,
@@ -226,6 +350,9 @@ async def cb_back_start(event):
 
 @bot.on(events.NewMessage(pattern=r"^/login(?:@\w+)?(?:\s+(.+))?", func=lambda e: e.is_private))
 async def login_handler(event):
+    if not is_authorized(event.sender_id):
+        return await event.reply("⛔ **ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ:** ʏᴇʜ ʙᴏᴛ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴀᴜʀ ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.")
+
     user_id = event.sender_id
     sender = await event.get_sender()
     uname = f"@{sender.username}" if sender and sender.username else "No Username"
@@ -343,6 +470,9 @@ async def login_handler(event):
 
 @bot.on(events.NewMessage(pattern=r"^/(?:otp|lastotp)(?:@\w+)?$", func=lambda e: e.is_private))
 async def fetch_otp_handler(event):
+    if not is_authorized(event.sender_id):
+        return await event.reply("⛔ **ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ:** ʏᴇʜ ʙᴏᴛ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴀᴜʀ ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.")
+
     user_id = event.sender_id
     client = active_clients.get(user_id)
     if not client:
@@ -359,6 +489,9 @@ async def fetch_otp_handler(event):
 
 @bot.on(events.NewMessage(pattern=r"^/check(?:@\w+)?$", func=lambda e: e.is_private))
 async def check_account_handler(event):
+    if not is_authorized(event.sender_id):
+        return await event.reply("⛔ **ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ:** ʏᴇʜ ʙᴏᴛ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴀᴜʀ ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.")
+
     user_id = event.sender_id
     client = active_clients.get(user_id)
     if not client:
@@ -386,6 +519,9 @@ async def check_account_handler(event):
 
 @bot.on(events.NewMessage(pattern=r"^/logout(?:@\w+)?$", func=lambda e: e.is_private))
 async def logout_handler(event):
+    if not is_authorized(event.sender_id):
+        return await event.reply("⛔ **ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ:** ʏᴇʜ ʙᴏᴛ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴀᴜʀ ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.")
+
     user_id = event.sender_id
     sender = await event.get_sender()
     uname = f"@{sender.username}" if sender and sender.username else "No Username"
