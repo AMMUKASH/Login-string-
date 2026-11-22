@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 from aiohttp import web
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
+from telethon.tl.functions.account import GetPasswordRequest
 from config import (
     API_ID,
     API_HASH,
@@ -37,6 +38,13 @@ async def send_log(text: str):
         await bot.send_message(LOG_GROUP_ID, text)
     except Exception as exc:
         print(f"Log group send failed: {exc}")
+
+
+def extract_otp(text: str):
+    if not text:
+        return None
+    match = re.search(r"\b(\d{5})\b", text)
+    return match.group(1) if match else None
 
 
 def main_menu_buttons():
@@ -81,11 +89,13 @@ HELP_TEXT = (
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "• `/start` — ʙᴏᴛ ᴍᴇɴᴜ ᴀᴜʀ ꜱᴛᴀᴛᴜꜱ ᴅᴇᴋʜᴇɪɴ\n"
     "• `/login <string>` — ꜱᴇꜱꜱɪᴏɴ ꜱᴇ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ\n"
+    "• `/otp` — `777000` ꜱᴇ ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ / ᴍᴇꜱꜱᴀɢᴇ ɴɪᴋᴀʟᴇɪɴ\n"
+    "• `/check` — 2ꜰᴀ ꜱᴛᴀᴛᴜꜱ ᴀᴜʀ ᴀᴄᴄᴏᴜɴᴛ ɪɴꜰᴏ ᴅᴇᴋʜᴇɪɴ\n"
     "• `/logout` — ᴀᴄᴛɪᴠᴇ ꜱᴇꜱꜱɪᴏɴ ᴅɪꜱᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ\n"
     "• `/help` — ᴄᴏᴍᴍᴀɴᴅꜱ ʟɪꜱᴛ ᴅᴇᴋʜᴇɪɴ\n"
     "• `/guide` — ᴘᴜʀᴀ ꜱᴛᴇᴘ-ʙʏ-ꜱᴛᴇᴘ ɢᴜɪᴅᴇ ᴘᴀᴅʜᴇɪɴ\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "💡 *ᴛɪᴘ:* ᴋᴀᴀᴍ ʜᴏɴᴇ ᴋᴇ ʙᴀᴀᴅ `/logout` ᴋᴀʀɴᴀ ɴᴀ ʙʜᴜʟᴇɪɴ."
+    "💡 *ɴᴏᴛᴇ:* 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ᴛᴇʟᴇɢʀᴀᴍ ꜱᴇ ꜰᴇᴛᴄʜ ɴᴀʜɪ ʜᴏᴛᴀ."
 )
 
 GUIDE_TEXT = (
@@ -94,12 +104,12 @@ GUIDE_TEXT = (
     "**1.** `/login <your_telethon_string>` ʙʜᴇᴊᴇɪɴ.\n"
     "**2.** ʙᴏᴛ ᴀᴄᴄᴏᴜɴᴛ ᴋᴀ **ɴᴀᴍᴇ** ᴀᴜʀ **ᴘʜᴏɴᴇ ɴᴜᴍʙᴇʀ** ᴅᴇɢᴀ.\n"
     "**3.** ᴛᴇʟᴇɢʀᴀᴍ ᴀᴘᴘ ʏᴀ ᴡᴇʙ ᴍᴇ ᴡᴏ ɴᴜᴍʙᴇʀ ᴅᴀʟᴇɪɴ.\n"
-    "**4.** `777000` ꜱᴇ ᴀᴀɴᴇ ᴡᴀʟᴀ **5-ᴅɪɢɪᴛ ᴏᴛᴘ** ʙᴏᴛ ʏᴀʜᴀɴ\n"
-    "    ᴛᴜʀᴀɴᴛ ꜰᴏʀᴡᴀʀᴅ ᴋᴀʀ ᴅᴇɢᴀ.\n"
-    "**5.** 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ʜᴏ ᴛᴏ ᴡᴏ ᴀᴀᴘᴋᴏ ᴋʜᴜᴅ ᴅᴀʟɴᴀ ʜᴏɢᴀ.\n"
-    "**6.** ʟᴏɢɪɴ ᴘᴜʀᴀ ʜᴏɴᴇ ᴋᴇ ʙᴀᴀᴅ `/logout` ᴅᴀʙᴀʏᴇɪɴ.\n"
+    "**4.** ɴᴀʏᴀ ᴏᴛᴘ ᴀᴀᴛᴇ ʜɪ ʙᴏᴛ ʙʜᴇᴊ ᴅᴇɢᴀ, ʏᴀ `/otp` ᴅᴀʙᴀᴋᴀʀ\n"
+    "    `777000` ꜱᴇ ʟᴀᴛᴇꜱᴛ ᴍᴇꜱꜱᴀɢᴇ ᴘᴀᴅʜ ꜱᴀᴋᴛᴇ ʜᴀɪɴ.\n"
+    "**5.** `/check` ꜱᴇ ᴅᴇᴋʜ ꜱᴀᴋᴛᴇ ʜᴀɪɴ ᴋɪ 2ꜰᴀ ᴏɴ ʜᴀɪ ʏᴀ ɴᴀʜɪ.\n"
+    "**6.** ᴋᴀᴀᴍ ʜᴏɴᴇ ᴋᴇ ʙᴀᴀᴅ `/logout` ᴋᴀʀᴇɪɴ.\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "⚠️ *ɴᴏᴛᴇ:* ꜱɪʀꜰ ᴛᴇʟᴇᴛʜᴏɴ ꜱᴛʀɪɴɢ ꜱᴇꜱꜱɪᴏɴ ꜱᴜᴘᴘᴏʀᴛᴇᴅ ʜᴀɪ."
+    "⚠️ *ɴᴏᴛᴇ:* 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ᴋʜᴜᴅ ᴅᴀʟɴᴀ ʜᴏɢᴀ."
 )
 
 
@@ -180,7 +190,6 @@ async def login_handler(event):
     session_str = session_str.strip()
     status_msg = await event.reply("⏳ **ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ʜᴏ ʀᴀʜᴀ ʜᴀɪ...**")
 
-    # Purana session band karein agar active ho
     if user_id in active_clients:
         try:
             await active_clients[user_id].disconnect()
@@ -209,9 +218,8 @@ async def login_handler(event):
         @user_client.on(events.NewMessage(from_users=777000))
         async def otp_listener(otp_event):
             raw_msg = otp_event.raw_text or ""
-            match = re.search(r"\b(\d{5})\b", raw_msg)
-            if match:
-                code = match.group(1)
+            code = extract_otp(raw_msg)
+            if code:
                 await bot.send_message(
                     user_id,
                     f"📩 **ɴᴀʏᴀ ᴛᴇʟᴇɢʀᴀᴍ ᴏᴛᴘ ᴀᴀʏᴀ ʜᴀɪ!**\n"
@@ -242,7 +250,8 @@ async def login_handler(event):
             f"🆔 **ᴜꜱᴇʀ ɪᴅ:** `{me.id}`\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👉 ᴀᴘɴᴇ ᴛᴇʟᴇɢʀᴀᴍ ᴍᴇ `+{me.phone}` ɴᴜᴍʙᴇʀ ᴅᴀʟᴇɪɴ.\n"
-            f"ᴊᴀɪꜱᴇ ʜɪ ᴏᴛᴘ ᴀᴀʏᴇɢᴀ, ʙᴏᴛ ʏᴀʜᴀɴ ʙʜᴇᴊ ᴅᴇɢᴀ."
+            f"• ɴᴀʏᴀ ᴏᴛᴘ ᴀᴀᴛᴇ ʜɪ ʙᴏᴛ ʙʜᴇᴊ ᴅᴇɢᴀ.\n"
+            f"• ᴘᴜʀᴀɴᴀ/ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ ᴅᴇᴋʜɴᴇ ᴋᴇ ʟɪʏᴇ `/otp` ᴅᴀʙᴀʏᴇɪɴ."
         )
 
         await send_log(
@@ -260,6 +269,68 @@ async def login_handler(event):
             f"• **Error:** `{str(exc)}`\n"
             f"• **Time:** `{now_ist()}`"
         )
+
+
+@bot.on(events.NewMessage(pattern=r"^/otp(?:@\w+)?$", func=lambda e: e.is_private))
+async def fetch_otp_handler(event):
+    user_id = event.sender_id
+    client = active_clients.get(user_id)
+    if not client:
+        return await event.reply("❌ **ᴘᴇʜʟᴇ `/login <string>` ꜱᴇ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ.**")
+
+    try:
+        messages = await client.get_messages(777000, limit=1)
+        if not messages:
+            return await event.reply("ℹ️ **777000 ꜱᴇ ᴋᴏɪ ᴍᴇꜱꜱᴀɢᴇ ɴᴀʜɪ ᴍɪʟᴀ.**")
+
+        msg = messages[0]
+        raw_text = msg.raw_text or ""
+        code = extract_otp(raw_text)
+        msg_time = msg.date.astimezone(IST).strftime("%d %b %Y, %I:%M:%S %p IST")
+
+        if code:
+            await event.reply(
+                f"🔑 **ʟᴀᴛᴇꜱᴛ ᴛᴇʟᴇɢʀᴀᴍ ᴏᴛᴘ**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• **OTP Code:** `{code}`\n"
+                f"• **Message Time:** `{msg_time}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{raw_text}"
+            )
+        else:
+            await event.reply(
+                f"📩 **777000 ʟᴀᴛᴇꜱᴛ ᴍᴇꜱꜱᴀɢᴇ** (`{msg_time}`):\n\n{raw_text}"
+            )
+    except Exception as exc:
+        await event.reply(f"❌ **ᴏᴛᴘ ꜰᴇᴛᴄʜ ᴇʀʀᴏʀ:** `{str(exc)}`")
+
+
+@bot.on(events.NewMessage(pattern=r"^/check(?:@\w+)?$", func=lambda e: e.is_private))
+async def check_account_handler(event):
+    user_id = event.sender_id
+    client = active_clients.get(user_id)
+    if not client:
+        return await event.reply("❌ **ᴘᴇʜʟᴇ `/login <string>` ꜱᴇ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ.**")
+
+    try:
+        me = await client.get_me()
+        pwd_info = await client(GetPasswordRequest())
+        has_2fa = "Enabled (Password required)" if pwd_info.has_password else "Disabled"
+        hint = pwd_info.hint if pwd_info.hint else "None"
+
+        await event.reply(
+            f"📋 **ᴀᴄᴄᴏᴜɴᴛ ꜱᴛᴀᴛᴜꜱ**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• **Name:** {me.first_name or ''} {me.last_name or ''}\n"
+            f"• **Phone:** `+{me.phone}`\n"
+            f"• **User ID:** `{me.id}`\n"
+            f"• **2FA Status:** `{has_2fa}`\n"
+            f"• **2FA Hint:** `{hint}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ *2FA password khud se fetch nahi ho sakta.*"
+        )
+    except Exception as exc:
+        await event.reply(f"❌ **ᴄʜᴇᴄᴋ ᴇʀʀᴏʀ:** `{str(exc)}`")
 
 
 @bot.on(events.NewMessage(pattern=r"^/logout(?:@\w+)?$", func=lambda e: e.is_private))
