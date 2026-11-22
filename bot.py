@@ -16,7 +16,11 @@ from config import (
     PORT,
 )
 
-bot = TelegramClient("autoview_otp_bot", API_ID, API_HASH)
+# Python 3.14 fix: TelegramClient initialize karne se pehle event loop set karein
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+bot = TelegramClient("autoview_otp_bot", API_ID, API_HASH, loop=loop)
 active_clients = {}
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -185,7 +189,7 @@ async def login_handler(event):
         del active_clients[user_id]
 
     try:
-        user_client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+        user_client = TelegramClient(StringSession(session_str), API_ID, API_HASH, loop=loop)
         await user_client.connect()
 
         if not await user_client.is_user_authorized():
@@ -294,4 +298,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop.run_until_complete(main())
