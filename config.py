@@ -5,7 +5,7 @@ load_dotenv()
 
 API_ID = int(os.getenv("API_ID", "38138069"))
 API_HASH = os.getenv("API_HASH", "2ed313ebcc45cbcf65d1fc736ec71681")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9205214965:AAF87m3s9ml9_SeIAe2zLlgOb9UOb-HUQHE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9052834788:AAHeUMxQ7KKkPCXxRLM8vcgkNu-jQgdF7_0")
 OWNER_ID = int(os.getenv("OWNER_ID", "8724182918"))
 LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", "-1003947649552"))
 START_IMG = os.getenv("START_IMG", "https://files.catbox.moe/fxl81r.jpg")
