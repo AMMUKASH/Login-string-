@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from aiohttp import web
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
-from telethon.tl.functions.account import GetPasswordRequest, UpdatePasswordRequest
+from telethon.tl.functions.account import GetPasswordRequest
 from telethon.tl.functions.auth import ResetAuthorizationsRequest
 from telethon.errors import (
     FloodWaitError,
